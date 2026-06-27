@@ -1,0 +1,1119 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <!-- NAVIO Step 0: Load the libraries -->
+        <script type="text/javascript" src="https://d3js.org/d3.v6.min.js"></script>
+        <script src="https://unpkg.com/popper.js@1.14/dist/umd/popper.min.js"></script>
+        <script type="text/javascript" src="https://unpkg.com/navio/dist/navio.min.js"></script>
+        <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/danfojs@1.2.0/lib/bundle.min.js"></script>
+        <script src="https://www.lactame.com/lib/ml/6.0.0/ml.min.js"></script>
+    </head>
+    <body>
+        <div id="configuration">
+            <label for="file_btn">Choose a file to load from your local FS:</label>
+            <button id="file_btn">Select File</button>
+            <label for="file_url">or provide an URL to the file:</label>
+            <input type="url" id="file_url"></input>
+            <br>
+            <label for="delimiter">Choose a delimiter character:</label>
+            <select id="delimiter">
+                <option value="," selected>,</option>
+                <option value=";">;</option>
+                <option value="\t">tab</option>
+            </select>
+            <br>
+            <label for="nv_strategy">Choose data display strategy:</label>
+            <select id="nv_strategy">
+                <option value="vanilla" selected>navio vanilla</option>
+                <option value="clustering">navio with clustering</option>
+                <option value="n_clustering">navio with n-clustering</option>
+            </select>
+            <br>
+            <label for="k_strategy">Choose strategy for calculating K:</label>
+            <select id="k_strategy">
+                <option value="pond_ponderation" selected>ponderation (based on observations for each representant (cluster))</option>
+                <option value="pond_bigger_clusters">prioritize bigger clusters</option>
+                <option value="pond_smaller_clusters">prioritize smaller clusters</option>
+                <option value="pond_worst_clusters">Prioritize clusters groupping most different data</option>
+            </select>
+            <br>
+            <label for="k_clusters">Choose the number of representants (K) to display in navio:</label>
+            <input type="number" id="k_clusters" placeholder="600"></input>
+            <br>
+            <button id="load_navio">Load navio</button>
+        </div>
+        <!-- Placeholder for the widget -->
+        <div id="navios_container"></div>
+
+        <script type="module">
+            import kMedoids from 'https://cdn.jsdelivr.net/npm/k-medoids@1.0.8/+esm'
+            //####################################################################
+            // ### DEFINITION OF FUNCTION UTILITIES ###
+            //####################################################################
+            function drop_nan_columns(data) {
+                let data_length = data.length;
+                let columns_with_all_nan = new Object();
+
+                for(let column of data.columns) {
+                    columns_with_all_nan[column] = 0;
+                }
+
+                for(let row of data) {
+                    for(let key in row) {
+                        if((row[key] === "") || (row[key] === null)) {
+                            columns_with_all_nan[key] += 1;
+                        }
+                    }
+                }
+
+                // Go through every column to check if all its values (of a single column) are empty
+                for(let column in columns_with_all_nan) {
+                    if(columns_with_all_nan[column] >= data_length) {
+                        data.columns = data.columns.filter((d) => { return d !== column });    // remove column from list
+                        for(let row of data) {
+                            delete row[column];
+                        }
+                    }
+                }
+            }
+
+            function drop_nan_rows(data) {
+                let n_columns = data.columns.length
+                let row_nan_count = 0;
+                let indices_to_drop = new Array();
+
+                for(let row of data) {
+                    row_nan_count = 0;
+                    for(let key in row) {
+                        if((row[key] === "") || (row[key] === null)) {
+                            row_nan_count += 1;
+                        }
+                    }
+                    if(row_nan_count >= n_columns) {
+                        indices_to_drop.push(data.indexOf(row));
+                    }
+                }
+
+                let n_rows_to_drop = indices_to_drop.length;
+                
+                for(let i = 0; i < n_rows_to_drop; i++) {
+                    let index = indices_to_drop.pop();
+                    data.splice(index, 1);
+                }
+            }
+
+            // Checks if all columns of a row are equal to another row/slice/array
+            function get_row_indices(boolean_df) {
+                let boolean_columns = boolean_df.$dataIncolumnFormat;
+                let df_shape = boolean_df.shape;
+                let n_rows = df_shape[0];
+                let n_columns = df_shape[1];
+
+                let all_columns = true;
+
+                let indices_array = [];
+
+                for(let i = 0; i < n_rows; i++) {
+                    for(let j = 0; j < n_columns; j++) {
+                        all_columns = all_columns && boolean_columns[j][i];
+                    }
+                    if(all_columns) {
+                        indices_array.push(i);
+                    }
+                    all_columns = true;
+                }
+
+                return indices_array;
+            }
+
+            // Transforms centers result (Array of Arrays - matrix) to Arrays of objects (navios data format)
+            function centers_arr_to_centers_obj(centers_result) {
+                return centers_result.map(
+                    row => {
+                        let data_entries = DATASET_COLUMNS.map(
+                            (key, index) => [key, row.centroid[index]]
+                        );
+                        data_entries.push(['n_observations', row.size]);
+                        return Object.fromEntries(data_entries);
+                    }
+                );
+            }
+
+            // Function to provide an API similar to KMeans for using KMedoids
+            function get_kmedoids(array_of_observations, k_clusters, random_state) {
+                const clusterer_obj = kMedoids.Clusterer.getInstance(array_of_observations, k_clusters);
+                clusterer_obj.getClusteredData();
+                let centroids = new Array(clusterer_obj.Clusters.length);
+                let clusters = new Array(array_of_observations.length).fill(-1);
+
+                // Loop through the clusters
+                for(let i = 0; i < centroids.length; i++) {
+                    // Build centroids object (for consistency with the API of KMeans)
+                    centroids[i] = {
+                        centroid: clusterer_obj.Clusters[i].Medoid,
+                        size: clusterer_obj.Clusters[i].Elements.length
+                    };
+
+                    // Give to each observation its corresponding label, in order (for consistency with KMeans API)
+                    for(let j = 0; j < clusters.length; j++) {
+                        if(clusters[j] < 0) {
+                            //console.log('Point', j);
+                            for(let observation of clusterer_obj.Clusters[i].Elements) {
+                                //console.log('Observation:', observation);
+                                if(array_of_observations[j].every((attrib, idx) => attrib === observation.Element[idx])) {
+                                    clusters[j] = i;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                return {
+                    clusters: clusters,
+                    centroids: centroids
+                    
+                };
+            }
+
+            //####################################################################
+
+            //####################################################################
+            // ### DEFINITION OF SUBCLUSTERING FUNCTIONS ###
+            //####################################################################
+            function pond_worst_clusters(selected_centers) {
+                return null;
+            }
+            
+            function pond_bigger_clusters(selected_centers) {
+                let array_of_k = new Array(selected_centers.length).fill(1);
+                let n_observations = [];
+                let observations_splits_per_cluster = new Array(selected_centers.length);
+
+                // Loop through the parents list of centers and get their number of observation
+                for(let cluster_results_n of CLUSTERS_ARRAY[NV_INDEX-1]) {
+                    // Loop through the data ob each cluster array
+                    for(let cluster_results_obj of cluster_results_n.centroids) {
+                        // Check if center is selected
+                        for(let center of selected_centers) {
+                            // If center is a selected center, get its size and calculate total number of selected observations
+                            if(center.every((attrib, idx) => attrib === cluster_results_obj.centroid[idx])) {
+                                n_observations.push(cluster_results_obj.size);
+                            }
+                        }
+                    }
+                }
+
+                // We loop until we reach the optimum K_CLUSTERS
+                while(array_of_k.reduce((sum, next) => sum + next, 0) < K_CLUSTERS) {
+                    // We calculate the resulting ofservations for each split of each parent cluster (optimistic approach)
+                    for(let i = 0; i < observations_splits_per_cluster.length; i++) {
+                        observations_splits_per_cluster[i] = n_observations[i] / array_of_k[i];
+                    }
+
+                    // We get the biggest n_observations and second biggest n_observations
+                    let max_value = Math.max(...observations_splits_per_cluster);
+                    let max_index = observations_splits_per_cluster.indexOf(max_value);
+                    let biggest_observation = n_observations[max_index];
+                    let clusters_for_biggest_obs = array_of_k[max_index];
+                    let second_obs_splits_per_cluster = observations_splits_per_cluster.toSpliced(max_index, 1);
+                    let second_max_value = Math.max(...second_obs_splits_per_cluster);
+                    let second_max_index = observations_splits_per_cluster.indexOf(second_biggest_obs);
+                    let second_biggest_obs = n_observations[second_max_index];
+                    let stop_criteria = false;
+
+                    // Loop while m splits of biggest n_observation are bigger than second biggest n_observations
+                    while(!stop_criteria) {
+                        // If second biggest n_observations are bigger, then we stop adding to K of biggest n_observations
+                        if((biggest_observation / clusters_for_biggest_obs) < second_biggest_obs) {
+                            stop_criteria = true
+                        }
+
+                        // If not, we keep adding 1 by 1 until we reach the optimum K or previous condition is met
+                        else {
+                            clusters_for_biggest_obs += 1;
+                            array_of_k[max_index] = clusters_for_biggest_obs;
+                            let sum_of_k = array_of_k.reduce((sum, next) => sum + next, 0);
+
+                            if(sum_of_k == K_CLUSTERS) {
+                                stop_criteria = true;
+                            }
+
+                            else if(sum_of_k > K_CLUSTERS) {
+                                stop_criteria = true;
+                                array_of_k[max_index] -= 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            function pond_smaller_clusters(selected_centers) {
+                // Array of K values, prioritizing bigger clusters
+                let array_of_k = pond_bigger_clusters(selected_centers);
+
+                // Copy of the array to search for min-max pairs of values
+                let second_array_of_k = array_of_k.map(k => k);
+
+                // Array to store the result of swapping possitions of min and max values
+                let array_of_k_result = new Array(array_of_k.length);
+
+                let max_value = 0;
+                let max_index = 0;
+                let min_value = 0;
+                let min_index = 0;
+
+                let max_index_of_k = 0;
+                let min_index_of_k = 0;
+
+                // We loop through the array of K values to look for min-max pairs to swap
+                while(second_array_of_k.length > 1) {
+                    // We get the values (and its relative indices) of the min-max pairs
+                    max_value = Math.max(...second_array_of_k);
+                    max_index = second_array_of_k.indexOf(max_value);
+                    min_value = Math.min(...second_array_of_k);
+                    min_index = second_array_of_k.indexOf(min_value);
+
+                    // Once we have the pairs, we remove them from the arrays (to avoid duplicating the results)
+                    second_array_of_k = second_array_of_k.toSpliced(max_index, 1);
+                    second_array_of_k = second_array_of_k.toSpliced(min_index, 1);
+
+                    // Once we have the values, we get their indices
+                    max_index_of_k = array_of_k.indexOf(max_value);
+                    min_index_of_k = array_of_k.indexOf(min_value);
+
+                    // Once we get the indices, we remove the values from the original array
+                    // (so we dont get wrong indices in case the values are duplicate)
+                    array_of_k[max_index_of_k] = -1;
+                    array_of_k[min_index_of_k] = -1;
+
+                    // We swap the values
+                    array_of_k_result[max_index_of_k] = min_value;
+                    array_of_k_result[min_index_of_k] = max_value;
+                }
+
+                // We return the results of inversing the prioritization of clusters
+                return array_of_k_result;
+            }
+
+            function pond_ponderation(selected_centers) {
+                // Array to store the number of K clusters to apply to each group of data
+                // Al least, all selected centers get 1 data point, so we ensure that all K are set, at first, to one
+                let array_of_k = [];
+                let array_of_sizes = [];
+                let total_n_observations = 0;
+                let n_clusters = 0;
+
+                // Target K represents the rest of the amount that its left to reach K_CLUSTERS in
+                let target_k_clusters = K_CLUSTERS - selected_centers.length;
+
+                // Loop through the parents list of centers
+                for(let cluster_results_n of CLUSTERS_ARRAY[NV_INDEX-1]) {
+                    // Loop through the data ob each cluster array
+                    for(let cluster_results_obj of cluster_results_n.centroids) {
+                        // Check if center is selected
+                        for(let center of selected_centers) {
+                            // If center is a selected center, get its size and calculate total number of selected observations
+                            if(center.every((attrib, idx) => attrib === cluster_results_obj.centroid[idx])) {
+                                array_of_k.push(cluster_results_obj.size);
+                                total_n_observations += cluster_results_obj.size;
+                            }
+                        }
+                    }
+                }
+
+                // We calculate the ponderation of K clusters that correspond to each group of data
+                for(let i = 0; i < array_of_k.length; i++) {
+                    array_of_k[i] = array_of_k[i] / total_n_observations * target_k_clusters;
+                    n_clusters += Math.floor(array_of_k[i]);
+                }
+
+                // If we havent reached the optimum K_CLUSTERS, we calculate which groups of data are closer to its next natural number (in ascending order)
+                if(n_clusters < target_k_clusters) {
+                    let decimals = array_of_k.map((number) => number % 1);
+
+                    // We calculate the floor value of K, so we get natural numbers and we don't surpass the optimum value
+                    array_of_k = array_of_k.map((number) => Math.floor(number));
+
+                    // We add 1 by 1 to each K that is closest to the next natural number than the rest (the closests, the second closest, and so on until we reach the optimum K_CLUSTERS)
+                    for(let i = 0; i < (target_k_clusters - n_clusters); i++) {
+                        let max_value = Math.max(...decimals);
+                        let index = decimals.indexOf(max_value);
+
+                        array_of_k[index]++;
+                        decimals[index] = null;
+                    }
+                }
+
+                // We add the 1 cluster that we ensured that every group of data would have, at least.
+                for(let i = 0; i < array_of_k.length; i++) {
+                    array_of_k[i]++;
+                }
+
+                return array_of_k;
+            }
+
+            function pond_get_observations_from_cluster(centroid, cluster_array_of_arrays, get_centers_labels) {
+                let label = undefined;
+                let curr_level = 'level_' + (NV_INDEX - 1);
+
+                // Get label of the centroid
+                for(let cluster_array of cluster_array_of_arrays) {
+                    for(let centroid_obj of cluster_array.centroids) {
+                        if(centroid.every((attrib, idx) => attrib === centroid_obj.centroid[idx])) {
+                            label = centroid_obj.label;
+                            get_centers_labels.push(label);
+                            break;
+                        }
+                    }
+                    if(label !== undefined) {
+                        break;
+                    }
+                }
+
+                // Check if label is from previous level or not
+                let label_indices = label.split(',');
+                if(label_indices.length < NV_INDEX) {
+                    console.log('### ERROR GETTING OBSERVATIONS ###');
+                }
+
+                // Get indices of the selected data
+                let array_of_indices = INDEXED_DATASET.loc({ columns: [curr_level] }).values.map((label_df, index) => { if(label_df[0] === label) { return index } } );
+                array_of_indices = array_of_indices.filter( (index) => index !== undefined);
+
+                // Get the selected data from the DataFrame
+                let sel_observations_df = INDEXED_DATASET.query(array_of_indices);
+
+                // Return only the main columns (omit label columns)
+                return sel_observations_df.loc({ columns: DATASET_COLUMNS});
+            }
+
+            // Given a centroid/medoid of a cluster return the data belonging to that cluster
+            function get_observations_from_cluster(centroid, cluster_object) {
+                let label = 0;
+                let curr_level = 'level_' + (NV_INDEX - 1);
+
+                // Get label of the centroid
+                for(let centroid_obj of cluster_object.centroids) {
+                    if(centroid.every((attrib, idx) => attrib === centroid_obj.centroid[idx])) {
+                        break;
+                    }
+                    label++;
+                }
+
+                let array_of_indices = [];
+                let eq_df_label = INDEXED_DATASET.loc({ columns: [curr_level] }).eq(label);
+                eq_df_label.values.map((value, index) => { if(value[0] === true) {array_of_indices.push(index)} return value });
+                let sel_observations_df = INDEXED_DATASET.query(array_of_indices);
+
+                return sel_observations_df.loc({ columns: DATASET_COLUMNS});
+            }
+
+            // Get label of previous parent cluster and append this cluster label
+            // Adds the label results to de original df
+            function pond_add_cluster_labels(array_of_cluster_results, array_of_split_indices, previous_level_labels) {
+                let curr_level = 'level_' + NV_INDEX;
+
+                // Build an array to store the clustering results, assigning these results to their respective index in the df.
+                let labels_array = new Array(INDEXED_DATASET.shape[0]);
+
+                
+                let i = 0;
+                // Loop through the results of each split (slice of data belonging to a center)
+                for(let j = 0; j < array_of_cluster_results.length; j++){
+                    // Place each label in their respective index (row)
+                    for(let label of array_of_cluster_results[j].clusters) {
+                        labels_array[array_of_split_indices[j][i]] = previous_level_labels[j] + ',' + label;
+                        
+                        /*console.log('### CENTROID', i, 'FROM CLUSTER OBJ', j, '###', array_of_cluster_results[j].centroids[i]);
+                        console.log('### PREVIOUS LEVEL LABEL', j, '###', previous_level_labels[j]);
+                        console.log('### PREVIOUS LABELS ###', previous_level_labels);*/
+                        i++;
+                    }
+                    i=0;
+                }
+
+                //Add labels to the centers of the cluster_objects
+                for(let i = 0; i < array_of_cluster_results.length; i++) {
+                    for(let j = 0; j < array_of_cluster_results[i].centroids.length; j++) {
+                        array_of_cluster_results[i].centroids[j]['label'] = previous_level_labels[i] + ',' + j;
+                    }
+                }
+
+                INDEXED_DATASET.addColumn(curr_level, labels_array, { inplace: true });
+            }
+
+            // Adds the label results to de original df
+            function add_cluster_labels(cluster_results, indices) {
+                let curr_level = 'level_' + NV_INDEX;
+
+                // Build an array to store the clustering results, assigning these results to their respective index in the df.
+                let labels_array = new Array(INDEXED_DATASET.shape[0]);
+
+                // Place each label in their respective index
+                let i = 0;
+                for(let label of cluster_results) {
+                    labels_array[indices[i]] = label;
+                    i++;
+                }
+                INDEXED_DATASET.addColumn(curr_level, labels_array, { inplace: true });
+            }
+
+            // Clustering function over the given data and a given K
+            function pond_nv_clustering(original_data, selected_centers, cluster_result_array, clustering_function, n_clusters, pond_function) {
+                let clustering_obj = null;
+
+                let data = undefined;
+
+                let array_of_k_clusters = pond_ponderation(selected_centers);
+
+                let get_centers_labels = [];
+
+                let cluster_result_array_of_level = [];
+                let array_of_data_indices_vectors = [];
+
+                // Get data belonging to each selected center and apply cluster algorythm over each split of data
+                for(let i = 0; i < selected_centers.length; i++) {
+                    data = pond_get_observations_from_cluster(selected_centers[i], cluster_result_array[NV_INDEX-1], get_centers_labels);
+
+                    let data_length = data.shape[0];
+                    if(data_length < array_of_k_clusters[i]) {
+                        array_of_k_clusters[i] = data_length;
+                    }
+
+                    clustering_obj = clustering_function(data.values, array_of_k_clusters[i], { seed: RAND_STATE });
+
+                    // Save clustering results
+                    cluster_result_array_of_level.push(clustering_obj);
+
+                    // Save data indices
+                    array_of_data_indices_vectors.push(data.index);
+                }
+
+                // Assign resulting labels to the data (for indexing purposes)
+                pond_add_cluster_labels(cluster_result_array_of_level, array_of_data_indices_vectors, get_centers_labels);
+
+                // Save clustering results of this level to global variable
+                cluster_result_array.push(cluster_result_array_of_level);
+
+                // Build array of centers (with centers of each split)
+                let meta_clustering_obj_centroids = cluster_result_array_of_level.map((clustering_obj) => clustering_obj.centroids).reduce((aggregated, next) => aggregated.concat(next));
+
+                // Return cluster centers
+                return meta_clustering_obj_centroids;
+            }
+
+            // Clustering function over the given data
+            function nv_clustering(original_data, selected_centers, cluster_result_array, clustering_function) {
+                let clustering_obj = null;
+
+                let data = undefined;
+
+                let k_clusters = K_CLUSTERS;
+
+                
+                // Get data belonging to the selected_clusters
+                // If none selected (init navio), use all the data
+                if(selected_centers === null) {
+                    data = INDEXED_DATASET.loc({ columns: DATASET_COLUMNS });
+                    let data_length = data.shape[0];
+                    if(data_length > k_clusters) {
+                        clustering_obj = clustering_function(data.values, k_clusters, { seed: RAND_STATE });
+                    }
+                    else {
+                        clustering_obj = {
+                            centroids: data.values.map((centroid_element) => { return { centroid: centroid_element, error: 0, size: 1 } }),
+                            clusters: data.values.map((centroid_element, index) => index)
+                        };
+                    }
+                }
+
+                // Else, get data belonging to each selected center and apply cluster algorythm over the data
+                else {
+                    data = new dfd.DataFrame([new Array(DATASET_COLUMNS.length)], { index: [-1], columns: DATASET_COLUMNS });
+                    for(let center of selected_centers) {
+                        let aux_df = get_observations_from_cluster(center, cluster_result_array[NV_INDEX-1]);
+                        data = data.append(aux_df.values, aux_df.index);
+                        }
+
+                    // Drop initial row (auxiliar row to append DFs)
+                    data.drop({ index: [-1], inplace: true });
+
+                    let data_length = data.shape[0];
+                    if(data_length > k_clusters) {
+                        clustering_obj = clustering_function(data.values, k_clusters, { seed: RAND_STATE });
+                    }
+                    else {
+                        clustering_obj = {
+                            centroids: data.values.map((centroid_element) => { return { centroid: centroid_element, error: 0, size: 1 } }),
+                            clusters: data.values.map((centroid_element, index) => index)
+                        };
+                    }
+
+                    
+                }
+
+                // Save clustering results
+                cluster_result_array.push(clustering_obj);
+
+                // Assign resulting labels to the data (for indexing purposes)
+                add_cluster_labels(clustering_obj.clusters, data.index);
+
+                // Return cluster centers
+                return clustering_obj.centroids;
+            }
+
+            //####################################################################
+
+            //####################################################################
+            // ### DEFINITION FOR RENDERING NAVIO WITH CLUSTERING AND PONDERATIONS OF K ###
+            //####################################################################
+
+            function render_navio_pond(data) {
+                console.log('### NAVIO INDEX ###', NV_INDEX);
+                // Create element container of a navio instance
+                let navio_n_element = document.createElement('div');
+                navio_n_element.id = 'navio_' + NV_INDEX;
+
+                // Save index of this navio
+                let this_index = NV_INDEX;
+
+                // Add navio child element to DOM
+                NAVIOS_CONTAINER.appendChild(navio_n_element);
+
+                // NAVIO  Step 1.  Create a Navio passing a DOM element to place it and an optional height
+                let nv = navio(navio_n_element, NV_HEIGHT);
+                // NAVIO Step 2. Load your data!
+                nv.data(data);
+
+                // NAVIO Step 3. Detect your attributes (or load them manually)
+                nv.addAllAttribs();
+
+                let navios_to_drop = [];
+                let navio_table = navio_n_element.querySelector('g.brush rect');
+
+                // Callback to control whether the data was selected or not
+                navio_table.addEventListener('pointerdown', (event) => {
+                    if (event.button == 0) {
+                        event.target.classList.add('data_selected');
+
+                        // Control if previous navio was used for a new selection. If so, we remove bellow levels.
+                        if (this_index < NV_INDEX) {
+                            let tooltip_list = document.querySelectorAll('._nv_popover');
+                            let label_columns_to_drop = [];
+                            for(let i = this_index + 1; i <= NV_INDEX; i++) {
+                                try {
+                                    navios_to_drop.push(NAVIOS_CONTAINER.querySelector('#navio_' + i));
+                                    tooltip_list[i].remove();
+                                    label_columns_to_drop.push('level_' + i);
+                                    CLUSTERS_ARRAY.splice(-1,1);
+                                }
+                                catch(error) {
+                                    console.log(error);
+                                }
+                            }
+                            NV_INDEX=this_index;
+                            INDEXED_DATASET = INDEXED_DATASET.drop({ columns: label_columns_to_drop });
+                        }
+                    }
+                });
+
+                // Callback to control if previous navio was used for a new selection. If so, we remove bellow levels.
+                navio_table.addEventListener('pointerup', (event) => {
+                    if (event.button == 0) {
+                        for(let navio_element_drop of navios_to_drop) {
+                            navio_element_drop.remove();
+                        }
+                    }
+                });
+                
+                // Setup a selection callback
+                nv.updateCallback(
+                    (selected) => {
+                        if(navio_table.classList.contains('data_selected')) {
+                            // Copy of selection with cleaned attributes (without navio columns & custom ones)
+                            let selected_copy = selected.map(
+                                row => Object.fromEntries(
+                                    DATASET_COLUMNS.map(
+                                        (key, index) => [key, row[key]]
+                                    )
+                                )
+                            );
+
+                            navio_table.classList.remove('data_selected');
+
+                            // Change tooltip class so it doesn't get erased when creating a new navio
+                            let tooltip_list = document.querySelectorAll('._nv_popover');
+                            for(let tooltip of tooltip_list) {
+                                tooltip.classList.replace('_nv_popover', '_nv_popover_dont_delete');
+                            }
+
+                            NV_INDEX++;
+
+                            // Transform from array of objects to array of arrays (matrix)
+                            let selected_clusters_array = selected_copy.map((center_obj) => Object.values(center_obj));
+
+                            let new_centers_data = pond_nv_clustering(INDEXED_DATASET, selected_clusters_array, CLUSTERS_ARRAY, CLUSTERING_ALGORYTHM);
+
+                            // Transform Array of Arrays (matrix) to Array of Object (navio format)
+                            let new_centroids = centers_arr_to_centers_obj(new_centers_data);
+
+                            // Measure performance
+                            let start_time = performance.now();
+
+                            render_navio_pond(new_centroids);
+
+                            // Measure performance
+                            let end_time = performance.now();
+                            console.log(end_time - start_time, 'ms');
+
+                            // After rendering sub navio, put back original value of class for all tooltips
+                            for(let tooltip of tooltip_list) {
+                                tooltip.classList.replace('_nv_popover_dont_delete', '_nv_popover');
+                            }
+                        }
+                        else {
+                            console.log('ERROR')
+                        }
+                    }
+                );
+            }
+
+            //####################################################################
+
+            //####################################################################
+            // ### DEFINITION FOR RENDERING NAVIO WITH CLUSTERING AND CONSTANT K ###
+            //####################################################################
+
+            // function to render any navio
+            function render_navio(data) {
+                console.log('### NAVIO INDEX ###', NV_INDEX);
+                // Create element container of a navio instance
+                let navio_n_element = document.createElement('div');
+                navio_n_element.id = 'navio_' + NV_INDEX;
+
+                // Save index of this navio
+                let this_index = NV_INDEX;
+
+                // Add navio child element to DOM
+                NAVIOS_CONTAINER.appendChild(navio_n_element);
+
+                // NAVIO  Step 1.  Create a Navio passing a DOM element to place it and an optional height
+                let nv = navio(navio_n_element, NV_HEIGHT);
+                // NAVIO Step 2. Load your data!
+                nv.data(data);
+
+                // NAVIO Step 3. Detect your attributes (or load them manually)
+                nv.addAllAttribs();
+
+                let navios_to_drop = [];
+                let navio_table = navio_n_element.querySelector('g.brush rect');
+
+                // Callback to control whether the data was selected or not
+                navio_table.addEventListener('pointerdown', (event) => {
+                    if (event.button == 0) {
+                        event.target.classList.add('data_selected');
+
+                        // Control if previous navio was used for a new selection. If so, we remove bellow levels.
+                        if (this_index < NV_INDEX) {
+                            let tooltip_list = document.querySelectorAll('._nv_popover');
+                            let label_columns_to_drop = [];
+                            for(let i = this_index + 1; i <= NV_INDEX; i++) {
+                                try {
+                                    navios_to_drop.push(NAVIOS_CONTAINER.querySelector('#navio_' + i));
+                                    tooltip_list[i].remove();
+                                    label_columns_to_drop.push('level_' + i);
+                                    CLUSTERS_ARRAY.splice(-1,1);
+                                }
+                                catch(error) {
+                                    console.log(error);
+                                }
+                            }
+                            NV_INDEX=this_index;
+                            INDEXED_DATASET = INDEXED_DATASET.drop({ columns: label_columns_to_drop });
+                        }
+                    }
+                });
+
+                // Callback to control if previous navio was used for a new selection. If so, we remove bellow levels.
+                navio_table.addEventListener('pointerup', (event) => {
+                    if (event.button == 0) {
+                        for(let navio_element_drop of navios_to_drop) {
+                            navio_element_drop.remove();
+                        }
+                    }
+                });
+                
+                // Setup a selection callback
+                nv.updateCallback(
+                    (selected) => {
+                        if(navio_table.classList.contains('data_selected')) {
+                            // Copy of selection with cleaned attributes (without navio columns & custom ones)
+                            let selected_copy = selected.map(
+                                row => Object.fromEntries(
+                                    DATASET_COLUMNS.map(
+                                        (key, index) => [key, row[key]]
+                                    )
+                                )
+                            );
+
+                            navio_table.classList.remove('data_selected');
+
+                            // Change tooltip class so it doesn't get erased when creating a new navio
+                            let tooltip_list = document.querySelectorAll('._nv_popover');
+                            for(let tooltip of tooltip_list) {
+                                tooltip.classList.replace('_nv_popover', '_nv_popover_dont_delete');
+                            }
+
+                            NV_INDEX++;
+
+                            // Transform from array of objects to array of arrays (matrix)
+                            let selected_clusters_array = selected_copy.map((center_obj) => Object.values(center_obj));
+
+                            let new_centers_data = nv_clustering(INDEXED_DATASET, selected_clusters_array, CLUSTERS_ARRAY, CLUSTERING_ALGORYTHM);
+
+                            // Transform Array of Arrays (matrix) to Array of Object (navio format)
+                            let new_centroids = centers_arr_to_centers_obj(new_centers_data);
+
+                            // Measure performance
+                            let start_time = performance.now();
+
+                            render_navio(new_centroids);
+
+                            // Measure performance
+                            let end_time = performance.now();
+                            console.log(end_time - start_time, 'ms');
+
+                            // After rendering sub navio, put back original value of class for all tooltips
+                            for(let tooltip of tooltip_list) {
+                                tooltip.classList.replace('_nv_popover_dont_delete', '_nv_popover');
+                            }
+                        }
+                        else {
+                            console.log('ERROR')
+                        }
+                    }
+                );
+            }
+
+            //####################################################################
+
+            //####################################################################
+            // ### DEFINITION FOR RENDERING VANILLA NAVIO ###
+            //####################################################################
+
+            function render_navio_vanilla(data) {
+                console.log('### NAVIO INDEX ###', NV_INDEX);
+                // Create element container of a navio instance
+                let navio_n_element = document.createElement('div');
+                navio_n_element.id = 'navio_' + NV_INDEX;
+
+                // Save index of this navio
+                let this_index = NV_INDEX;
+
+                // Add navio child element to DOM
+                NAVIOS_CONTAINER.appendChild(navio_n_element);
+
+                // NAVIO  Step 1.  Create a Navio passing a DOM element to place it and an optional height
+                let nv = navio(navio_n_element, NV_HEIGHT);
+                // NAVIO Step 2. Load your data!
+                nv.data(data);
+
+                // NAVIO Step 3. Detect your attributes (or load them manually)
+                nv.addAllAttribs();
+            }
+
+            //####################################################################
+
+            //####################################################################
+            // ### AUXILIAR FUNCTIONS FOR CHOOSING RENDERING STRATEGY ###
+            //####################################################################
+
+            function vanilla() {
+                //####################################################################
+                // ### NAVIO WITHOUT CLUSTERING (VANILLA) ###
+                //####################################################################
+                let feed_data = INDEXED_DATASET.values.map(
+                    row => Object.fromEntries(
+                        DATASET_COLUMNS.map(
+                            (key, index) => [key, row[index]]
+                        )
+                    )
+                )
+                render_navio_vanilla(feed_data);
+            }
+
+            function clustering() {
+                //####################################################################
+                // ### NAVIO WITH CLUSTERING ###
+                //####################################################################
+                let centers_result = nv_clustering(INDEXED_DATASET.values, null, CLUSTERS_ARRAY, CLUSTERING_ALGORYTHM);
+
+                // Transform Array of Arrays (matrix) to Array of Object (navio format)
+                let centroids = centers_arr_to_centers_obj(centers_result);
+
+                // Render navio
+                render_navio(centroids);
+            }
+
+            function n_clustering() {
+                //####################################################################
+                // ### NAVIO WITH CLUSTERING & PONDERATIONS ###
+                //####################################################################
+                let centers_result_pond = nv_clustering(INDEXED_DATASET.values, null, CLUSTERS_ARRAY, CLUSTERING_ALGORYTHM);
+
+                // Transform Array of Arrays (matrix) to Array of Object (navio format)
+                let centroids_pond = centers_arr_to_centers_obj(centers_result_pond);
+
+                CLUSTERS_ARRAY[0] = [CLUSTERS_ARRAY[0]];
+
+                // Save each computed label with its corresponding centroid
+                for(let i = 0; i < centers_result_pond.length; i++) {
+                    centers_result_pond[i]['label'] = i.toString();
+                }
+
+                // Transform labels from int to string
+                INDEXED_DATASET['level_0'] = INDEXED_DATASET['level_0'].apply((label) => label.toString());
+
+                // Render navio
+                render_navio_pond(centroids_pond);
+            }
+
+            //####################################################################
+
+            function main_df(df) {
+                //####################################################################
+                // ### Data cleaning ###
+                //####################################################################
+                // Replace null with NaN
+                df = df.applyMap((df_element) => {
+                    let element_to_return = df_element;
+                    if(df_element === null) {
+                        element_to_return = NaN;
+                    }
+
+                    return element_to_return;
+                });
+
+                // Drop NaN columns
+                df.dropNa({ axis: 0, inplace: true });
+
+                // Drop NaN rows
+                df.dropNa({ axis: 1, inplace: true });
+
+                try {
+                    // Encode dates to ints (each date is assigned an integer in ascending order from 0)
+                    let lbl_encoder = new dfd.LabelEncoder();
+                    lbl_encoder.fit(df['Date']);
+
+                    let encoded_dates = lbl_encoder.transform(df['Date']);
+                    df['Date'] = encoded_dates.values;
+
+                    // Conver Time to int
+                    df.asType('Time','int32', true);
+                    
+                    // Convert comma numbers to dot numbers (decimal part)
+                    df = df.applyMap((df_element) => {
+                        let element_to_return = df_element;
+                        if(typeof df_element === "string") {
+                            element_to_return = df_element.replace(',', '.');
+                        }
+
+                        return element_to_return;
+                    });
+
+                    // Cast columns to their respective types
+                    for(let df_column of df.selectDtypes(['string']).columns) {
+                        df.asType(df_column,'float32',true);
+                    }
+                }
+                catch(error) {
+                    console.log(error);
+                }
+                try {
+                    df.drop({ columns: ['variety'], inplace: true });
+                }
+                catch(error) {
+                    console.log(error);
+                }
+                //####################################################################
+
+                //####################################################################
+                // ### INIATIALIZATION OF GLOBALS ###
+                //####################################################################
+
+                INDEXED_DATASET = df;
+                DATASET_COLUMNS = df.columns;
+
+                //####################################################################
+
+                //####################################################################
+                // ### NAVIO WITH CLUSTERING & PONDERATIONS ###
+                //####################################################################
+
+                /*let centers_result_pond = nv_clustering(INDEXED_DATASET.values, null, CLUSTERS_ARRAY, CLUSTERING_ALGORYTHM);
+
+                // Transform Array of Arrays (matrix) to Array of Object (navio format)
+                let centroids_pond = centers_arr_to_centers_obj(centers_result_pond);
+
+                CLUSTERS_ARRAY[0] = [CLUSTERS_ARRAY[0]];
+
+                // Save each computed label with its corresponding centroid
+                for(let i = 0; i < centers_result_pond.length; i++) {
+                    centers_result_pond[i]['label'] = i.toString();
+                }
+
+                // Transform labels from int to string
+                INDEXED_DATASET['level_0'] = INDEXED_DATASET['level_0'].apply((label) => label.toString());
+
+                // Render navio
+                render_navio_pond(centroids_pond);*/
+
+                //####################################################################
+
+                //####################################################################
+                // ### NAVIO WITH CLUSTERING ###
+                //####################################################################
+
+                /*let centers_result = nv_clustering(INDEXED_DATASET.values, null, CLUSTERS_ARRAY, CLUSTERING_ALGORYTHM);
+
+                // Transform Array of Arrays (matrix) to Array of Object (navio format)
+                let centroids = centers_arr_to_centers_obj(centers_result);
+
+                // Render navio
+                render_navio(centroids);*/
+
+                //####################################################################
+
+                //####################################################################
+                // ### NAVIO WITHOUT CLUSTERING ###
+                //####################################################################
+
+                /*let feed_data = INDEXED_DATASET.values.map(
+                    row => Object.fromEntries(
+                        DATASET_COLUMNS.map(
+                            (key, index) => [key, row[index]]
+                        )
+                    )
+                )
+                render_navio_vanilla(feed_data);*/
+
+                //####################################################################
+
+                //####################################################################
+                // ### RENDER NAVIO BASED ON SELECTED STRATEGY ###
+                //####################################################################
+
+                let start_time = performance.now();
+
+                NV_STRATEGY();
+
+                let end_time = performance.now();
+
+                console.log(end_time - start_time, 'ms');
+            }
+
+            //####################################################################
+
+            //####################################################################
+            // ### GLOBAL VARIABLES ###
+            //####################################################################
+            const NAVIOS_CONTAINER = document.querySelector('#navios_container');
+            const RAND_STATE = 2026;
+            const CLUSTERS_ARRAY = [];
+            var CLUSTERING_ALGORYTHM = ML.KMeans;
+            //var CLUSTERING_ALGORYTHM = get_kmedoids;
+            var NV_STRATEGY = vanilla;
+            var K_STRATEGY = pond_ponderation;
+            var DATASET_COLUMNS;
+            var INDEXED_DATASET;
+            var K_CLUSTERS = 600;
+            var NV_INDEX = 0;
+            var NV_INDEX_POND = 0;
+            var NV_HEIGHT = 600;
+            var dataset_location = "https://gist.githubusercontent.com/netj/8836201/raw/6f9306ad21398ea43cba4f7d537619d0e07d5ae3/iris.csv";
+            //var dataset_location = "./AirQualityUCI.csv";
+            var LOADED_FILE;
+            var DELIMITER = ',';
+
+            //####################################################################
+
+            //####################################################################
+            // ### AUXILIAR FUNCTIONS TO LOAD THE DATA ###
+            //####################################################################
+
+            async function getFile() {
+                // Open file picker and destructure the result the first handle
+                const [fileHandle] = await window.showOpenFilePicker();
+                const file = await fileHandle.getFile();
+                LOADED_FILE = file;
+
+                return file;
+            }
+
+            function get_file_url(event) {
+                LOADED_FILE = event.target.value;
+            }
+
+            function get_delimiter(event) {
+                DELIMITER = event.target.value;
+            }
+
+            function get_nv_strategy(event) {
+                let strategy = event.target.value
+                if(strategy === 'vanilla') {
+                    NV_STRATEGY = vanilla;
+                }
+                else if(strategy === 'clustering') {
+                    NV_STRATEGY = clustering;
+                }
+                else if(strategy === 'n_clustering') {
+                    NV_STRATEGY = n_clustering;
+                }
+            }
+
+            function get_k_strategy(event) {
+                let strategy = event.target.value
+
+                if(strategy === 'pond_ponderation') {
+                    NV_STRATEGY = pond_ponderation;
+                }
+                else if(strategy === 'pond_bigger_clusters') {
+                    NV_STRATEGY = pond_bigger_clusters;
+                }
+                else if(strategy === 'pond_smaller_clusters') {
+                    NV_STRATEGY = pond_smaller_clusters;
+                }
+                else if(strategy === 'pond_worst_clusters') {
+                    NV_STRATEGY = pond_worst_clusters;
+                }
+            }
+
+            function get_k_clusters(event) {
+                K_CLUSTERS = parseInt(event.target.value, 10);
+                console.log(typeof K_CLUSTERS);
+            }
+
+            function main() {
+                document.querySelector('#configuration').style.display = 'none';
+                dfd.readCSV(LOADED_FILE, { delimiter: DELIMITER }).then(main_df);
+            }
+
+            //####################################################################
+
+            //####################################################################
+            // ### RETRIEVE DATA AND CALL MAIN ###
+            //####################################################################
+
+            document.querySelector('#file_btn').addEventListener('click', getFile);
+            document.querySelector('#file_url').addEventListener('input', get_file_url);
+            document.querySelector('#delimiter').addEventListener('change', get_delimiter);
+            document.querySelector('#nv_strategy').addEventListener('change', get_nv_strategy);
+            document.querySelector('#k_strategy').addEventListener('change', get_k_strategy);
+            document.querySelector('#k_clusters').addEventListener('input', get_k_clusters);
+            document.querySelector('#load_navio').addEventListener('click', main);
+
+            //####################################################################
+        </script>
+    </body>
+</html>
