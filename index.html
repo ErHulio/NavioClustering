@@ -29,6 +29,12 @@
                 <option value="n_clustering">navio with n-clustering</option>
             </select>
             <br>
+            <label for="clustering_strategy">Choose clustering strategy:</label>
+            <select id="clustering_strategy">
+                <option value="k-means" selected>K-Means (representants are synthetic)</option>
+                <option value="k-medoids">K-Medoids (representants are observations from the dataset)</option>
+            </select>
+            <br>
             <label for="k_strategy">Choose strategy for calculating K:</label>
             <select id="k_strategy">
                 <option value="pond_ponderation" selected>ponderation (based on observations for each representant (cluster))</option>
@@ -47,6 +53,7 @@
 
         <script type="module">
             import kMedoids from 'https://cdn.jsdelivr.net/npm/k-medoids@1.0.8/+esm'
+            import silhouetteScore from 'https://cdn.jsdelivr.net/npm/@robzzson/silhouette@0.0.7/+esm'
             //####################################################################
             // ### DEFINITION OF FUNCTION UTILITIES ###
             //####################################################################
@@ -199,6 +206,7 @@
                             // If center is a selected center, get its size and calculate total number of selected observations
                             if(center.every((attrib, idx) => attrib === cluster_results_obj.centroid[idx])) {
                                 n_observations.push(cluster_results_obj.size);
+                                break;
                             }
                         }
                     }
@@ -218,14 +226,15 @@
                     let clusters_for_biggest_obs = array_of_k[max_index];
                     let second_obs_splits_per_cluster = observations_splits_per_cluster.toSpliced(max_index, 1);
                     let second_max_value = Math.max(...second_obs_splits_per_cluster);
-                    let second_max_index = observations_splits_per_cluster.indexOf(second_biggest_obs);
+                    let second_max_index = observations_splits_per_cluster.indexOf(second_max_value);
                     let second_biggest_obs = n_observations[second_max_index];
+                    let clusters_for_2nd_obs = array_of_k[second_max_index];
                     let stop_criteria = false;
 
                     // Loop while m splits of biggest n_observation are bigger than second biggest n_observations
                     while(!stop_criteria) {
                         // If second biggest n_observations are bigger, then we stop adding to K of biggest n_observations
-                        if((biggest_observation / clusters_for_biggest_obs) < second_biggest_obs) {
+                        if((biggest_observation / clusters_for_biggest_obs) < (second_biggest_obs / clusters_for_2nd_obs)) {
                             stop_criteria = true
                         }
 
@@ -246,6 +255,8 @@
                         }
                     }
                 }
+
+                return array_of_k;
             }
 
             function pond_smaller_clusters(selected_centers) {
@@ -271,20 +282,28 @@
                     // We get the values (and its relative indices) of the min-max pairs
                     max_value = Math.max(...second_array_of_k);
                     max_index = second_array_of_k.indexOf(max_value);
-                    min_value = Math.min(...second_array_of_k);
-                    min_index = second_array_of_k.indexOf(min_value);
 
                     // Once we have the pairs, we remove them from the arrays (to avoid duplicating the results)
                     second_array_of_k = second_array_of_k.toSpliced(max_index, 1);
+
+                    // We repeat the proccess for the min value
+                    min_value = Math.min(...second_array_of_k);
+                    min_index = second_array_of_k.indexOf(min_value);
+
+                    // Also for the min relative index
                     second_array_of_k = second_array_of_k.toSpliced(min_index, 1);
 
                     // Once we have the values, we get their indices
                     max_index_of_k = array_of_k.indexOf(max_value);
-                    min_index_of_k = array_of_k.indexOf(min_value);
 
                     // Once we get the indices, we remove the values from the original array
                     // (so we dont get wrong indices in case the values are duplicate)
                     array_of_k[max_index_of_k] = -1;
+
+                    // We repeat the proccess for the min value
+                    min_index_of_k = array_of_k.indexOf(min_value);
+
+                    // Also, when overwritting its original value
                     array_of_k[min_index_of_k] = -1;
 
                     // We swap the values
@@ -317,6 +336,7 @@
                             if(center.every((attrib, idx) => attrib === cluster_results_obj.centroid[idx])) {
                                 array_of_k.push(cluster_results_obj.size);
                                 total_n_observations += cluster_results_obj.size;
+                                break;
                             }
                         }
                     }
@@ -465,7 +485,8 @@
 
                 let data = undefined;
 
-                let array_of_k_clusters = pond_ponderation(selected_centers);
+                //let array_of_k_clusters = pond_ponderation(selected_centers);
+                let array_of_k_clusters = K_STRATEGY(selected_centers);
 
                 let get_centers_labels = [];
 
@@ -1072,26 +1093,35 @@
                 }
             }
 
+            function get_clustering_method(event) {
+                let method = event.target.value;
+                if(method === 'k-means') {
+                    CLUSTERING_ALGORYTHM = ML.KMeans;
+                }
+                else if(method === 'k-medoids') {
+                    CLUSTERING_ALGORYTHM = get_kmedoids;
+                }
+            }
+
             function get_k_strategy(event) {
                 let strategy = event.target.value
 
                 if(strategy === 'pond_ponderation') {
-                    NV_STRATEGY = pond_ponderation;
+                    K_STRATEGY = pond_ponderation;
                 }
                 else if(strategy === 'pond_bigger_clusters') {
-                    NV_STRATEGY = pond_bigger_clusters;
+                    K_STRATEGY = pond_bigger_clusters;
                 }
                 else if(strategy === 'pond_smaller_clusters') {
-                    NV_STRATEGY = pond_smaller_clusters;
+                    K_STRATEGY = pond_smaller_clusters;
                 }
                 else if(strategy === 'pond_worst_clusters') {
-                    NV_STRATEGY = pond_worst_clusters;
+                    K_STRATEGY = pond_worst_clusters;
                 }
             }
 
             function get_k_clusters(event) {
                 K_CLUSTERS = parseInt(event.target.value, 10);
-                console.log(typeof K_CLUSTERS);
             }
 
             function main() {
@@ -1109,6 +1139,7 @@
             document.querySelector('#file_url').addEventListener('input', get_file_url);
             document.querySelector('#delimiter').addEventListener('change', get_delimiter);
             document.querySelector('#nv_strategy').addEventListener('change', get_nv_strategy);
+            document.querySelector('#clustering_strategy').addEventListener('change', get_clustering_method);
             document.querySelector('#k_strategy').addEventListener('change', get_k_strategy);
             document.querySelector('#k_clusters').addEventListener('input', get_k_clusters);
             document.querySelector('#load_navio').addEventListener('click', main);
