@@ -53,10 +53,149 @@
 
         <script type="module">
             import kMedoids from 'https://cdn.jsdelivr.net/npm/k-medoids@1.0.8/+esm'
-            import silhouetteScore from 'https://cdn.jsdelivr.net/npm/@robzzson/silhouette@0.0.7/+esm'
             //####################################################################
             // ### DEFINITION OF FUNCTION UTILITIES ###
             //####################################################################
+            function silhouette_score(vectors, labels, distanceFormula) {
+                /* Modification of code from https://unpkg.com/silhouette-coefficient@1.0.9/dist/silhouette.cjs
+                 * Modification includes retrieval of silhouette coeficient plus the mean of the silhouettes from each cluster
+                 */
+                const euclidianDistance = (a, b) => {
+                let distance = 0;
+
+                Object.keys(a).forEach((key) => {
+                    distance += Math.pow(a[key] - b[key], 2);
+                });
+
+                return Math.sqrt(distance);
+                };
+
+                /**
+                 *
+                 * The silhouette coefficient measures how similar a point is to its own cluster
+                 * and how dissimilar to others. It ranges from -1 to 1, where higher values indicate
+                 * better clustering quality.
+                 *
+                 * @param {number[][]} vectors - An array of points where each array index is an array of coordinates for said point.
+                 * @param {number[]} labels - An array of cluster labels corresponding to each point in the vector.
+                 * @param {Function} [distanceFormula] - A function that computes the distance between two points.
+                 * @returns {number} The silhouette coefficient of the clustering.
+                 */
+
+                if (vectors.length !== labels.length) {
+                    throw new Error("Number of points and their corresponding labels must be the same length.");
+                }
+
+                // normalize label number to start from zero and not skip a number
+                let labelNormalization = new Map();
+                let n = 0;
+                for (let i = 0; i < labels.length; i++) {
+                    if (!labelNormalization.has(labels[i])) {
+                        labelNormalization.set(labels[i], n);
+                        n++;
+                    }
+                    labels[i] = labelNormalization.get(labels[i]);
+                }
+
+                //
+                // convert data and labels into clusters
+                let clusters = [];
+                for (let i = 0; i < Math.max(...labels) + 1; i++) {
+                    clusters.push([]);
+                }
+
+                if (clusters.length <= 1) {
+                    throw new Error("The number of clusters must be more than one.");
+                }
+
+                const dataPointDimension = vectors[0].length;
+                for (let i = 0; i < vectors.length; i++) {
+                    if (dataPointDimension != vectors[i].length) {
+                    throw new Error("Data points must all be of the same dimensions");
+                    }
+                    clusters[labels[i]].push(vectors[i]);
+                }
+                // --------------------------
+
+                // If a cluster is empty then throw unexpected error because it shouldn't trigger
+                for (let i = 0; i < clusters.length; i++) {
+                    if (!clusters[i].length) {
+                    // throw new Error("Unexpected condition error.");
+                    throw new Error(
+                        "Unexpected error. At least on cluster is empty. All clusters must have at least one data point.",
+                    );
+                    }
+                }
+
+                if (!distanceFormula) {
+                    distanceFormula = euclidianDistance;
+                }
+
+                let sTotal = 0;
+                let s_i_cluster = 0;
+                let s_i_cluster_array = [];
+                let datapointsCounter = 0;
+                // calculate mean silhouette score across all clusters
+                for (let i = 0; i < clusters.length; i++) {
+                    let cluster = clusters[i];
+                    datapointsCounter += cluster.length; // number of datapoints in this cluster. Needed to find the mean later
+
+                    // let s_c; // silhouette of the cluster
+                    if (cluster.length <= 1) {
+                    // s_c = 0; // if only one data point in cluster then the silhouette equals zero so it add nothing to the sum. so I continue with next cluster
+                    continue;
+                    }
+
+                    // iterate all data points in the cluster
+                    for (let j = 0; j < cluster.length; j++) {
+                        // cohesion--
+                        let totalInnerClusterDistance = 0;
+                        for (let k = 0; k < cluster.length; k++) {
+                            if (j === k) {
+                            // if it's the same data point then skip because I need its distance with the other data points in the same cluster, not with itself
+                            continue;
+                            }
+                            totalInnerClusterDistance += distanceFormula(cluster[j], cluster[k]); // measure distance between each data point in the cluster
+                        }
+                        let a_i = totalInnerClusterDistance / (cluster.length - 1);
+                        //   console.log("ai", a_i);
+                        // seperation--
+                        let b_iAll = [];
+                        for (let c = 0; c < clusters.length; c++) {
+                            if (c === i) {
+                            // if it's the same cluster then skip because I search for seperation here. I searched innercluster distance in cohesion
+                            continue;
+                            }
+                            let clusterB = clusters[c];
+                            let totalOuterClusterDistance = 0;
+                            for (let k = 0; k < clusterB.length; k++) {
+                            totalOuterClusterDistance += distanceFormula(cluster[j], clusterB[k]);
+                            }
+                            b_iAll.push(totalOuterClusterDistance / clusterB.length);
+                        }
+                        let b_i = Math.min(...b_iAll);
+                        //   console.log("biall", b_iAll, "bi", b_i);
+
+                        let s_i = (b_i - a_i) / Math.max(a_i, b_i);
+                        // console.log("s_i", (b_i - a_i) / Math.max(a_i, b_i));
+                        sTotal += (b_i - a_i) / Math.max(a_i, b_i);
+
+                        s_i_cluster += s_i;
+
+                        //
+                    } // end iteration of all data points in the cluster
+                    s_i_cluster_array.push(s_i_cluster/cluster.length);
+                    s_i_cluster = 0;
+                } // end iteration of all clusters
+                //   console.log("sTotal", sTotal, "datapointscounter", datapointsCounter);
+
+                return {
+                    s_coeficient: sTotal / datapointsCounter,
+                    s_clusters: s_i_cluster_array,
+                    mean_of_s_clusters: s_i_cluster_array.reduce((prev_result, next_element) => prev_result + next_element, 0) / s_i_cluster_array.length
+                }
+            }
+
             function drop_nan_columns(data) {
                 let data_length = data.length;
                 let columns_with_all_nan = new Object();
@@ -189,7 +328,93 @@
             // ### DEFINITION OF SUBCLUSTERING FUNCTIONS ###
             //####################################################################
             function pond_worst_clusters(selected_centers) {
-                return null;
+                let curr_level = 'level_' + (NV_INDEX - 1);
+                let selected_centers_label = [];
+                let centers_labels = [];
+                let max_element = 0;
+                let new_labels = [];
+                let data = [];
+                let scores_of_selected_centers = [];
+                let array_of_k_result = [];
+                // Loop through the parents list of centers and get their number of observation
+                for(let cluster_results_n of CLUSTERS_ARRAY[NV_INDEX-1]) {
+                    // Loop through the data of each cluster array
+                    for(let cluster_results_obj of cluster_results_n.centroids) {
+                        centers_labels.push(cluster_results_obj.label);
+                        // Check if center is selected
+                        for(let center of selected_centers) {
+                            // If center is a selected center, get its label
+                            if(center.every((attrib, idx) => attrib === cluster_results_obj.centroid[idx])) {
+                                selected_centers_label.push(cluster_results_obj.label);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Get data and labels of the clusters of the current level (before the level we are currently generating)
+                for(let i = 0; i < centers_labels.length; i++) {
+                    // Get indices of the selected data
+                    let array_of_indices = INDEXED_DATASET.loc({ columns: [curr_level] }).values.map((label_df, index) => { if(label_df[0] === centers_labels[i]) { return index } } );
+                    array_of_indices = array_of_indices.filter( (index) => index !== undefined);
+
+                    // Get the selected data from the DataFrame
+                    let sel_observations_df = INDEXED_DATASET.query(array_of_indices);
+
+                    // Return only the main columns (omit label columns)
+                    let aux_df = sel_observations_df.loc({ columns: DATASET_COLUMNS});
+
+                    // Save observation and its new cluster label to compute silhouette
+                    for(let observation of aux_df.values) {
+                        data.push(observation);
+                        new_labels.push(i);
+                    }
+                }
+
+                // Compute silhouette
+                let scores = silhouette_score(data, new_labels);
+
+                let sum_of_scores = 0;
+                // Save scores of each selected cluster
+                for(let center_label of selected_centers_label) {
+                    let selected_score = scores.s_clusters[centers_labels.indexOf(center_label)];
+                    scores_of_selected_centers.push(selected_score + 1);
+                    sum_of_scores += selected_score + 1;
+                }
+
+                console.log(scores_of_selected_centers);
+
+                let sum_aux = 0;
+                for(let cluster_score of scores_of_selected_centers) {
+                    sum_aux += sum_of_scores/cluster_score;
+                }
+
+                // Get K for each cluster
+                for(let cluster_score of scores_of_selected_centers) {
+                    //array_of_k_result.push(K_CLUSTERS * (1 - cluster_score/sum_of_scores) / (scores_of_selected_centers.length - 1));
+                    array_of_k_result.push(K_CLUSTERS * (sum_of_scores/cluster_score) / sum_aux);
+                }
+
+                // K must be int, so we cast it to int and, if we havent reached K_CLUSTERS, we add the differences
+                let copy_of_result_int = array_of_k_result.map((element) => Math.floor(element));
+                let copy_of_result = array_of_k_result.map((element) => element);
+                let n_clusters = copy_of_result_int.reduce((prev_result, next_element) => prev_result + next_element, 0);
+                let diff = K_CLUSTERS - n_clusters;
+
+                console.log(array_of_k_result, array_of_k_result.reduce((prev, next) => prev + next, 0), copy_of_result_int.reduce((prev, next) => prev + next, 0), diff);
+
+                while(diff > 0) {
+                    let max_value = Math.max(...copy_of_result);
+                    let index_max = array_of_k_result.indexOf(max_value);
+                    copy_of_result_int[index_max] += 1;
+                    copy_of_result.splice(index_max, 1);
+                    diff--;
+                }
+
+                console.log(copy_of_result_int.reduce((prev, next) => prev + next, 0), diff);
+
+                // Return number of int clusters to compute for each selected center
+                return copy_of_result_int;
             }
             
             function pond_bigger_clusters(selected_centers) {
@@ -311,6 +536,71 @@
                     array_of_k_result[min_index_of_k] = max_value;
                 }
 
+                let n_observations = [];
+
+                // Loop through the parents list of centers and get their number of observation
+                for(let cluster_results_n of CLUSTERS_ARRAY[NV_INDEX-1]) {
+                    // Loop through the data ob each cluster array
+                    for(let cluster_results_obj of cluster_results_n.centroids) {
+                        // Check if center is selected
+                        for(let center of selected_centers) {
+                            // If center is a selected center, get its size and calculate total number of selected observations
+                            if(center.every((attrib, idx) => attrib === cluster_results_obj.centroid[idx])) {
+                                n_observations.push(cluster_results_obj.size);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                let sum_of_diffs = 0;
+                for(let i = 0; i < n_observations.length; i++){
+                    let diffs = array_of_k_result[i] - n_observations[i];
+                    if(diffs > 0) {
+                        sum_of_diffs += diffs;
+                        array_of_k_result[i] = n_observations[i];
+                    }
+                    else {
+                        if(sum_of_diffs > 0) {
+                            if(diffs > 1) {
+                                console.log('### INSISDE IF ###');
+                                array_of_k_result[i] += 1;
+                                sum_of_diffs -= 1;
+                            }
+                        }
+                    }
+                }
+
+                let sum_of_k = array_of_k_result.reduce((prev, next) => prev + next, 0);
+
+                let index_of_cero = array_of_k_result.indexOf(0);
+                while(index_of_cero !== -1) {
+                    array_of_k_result[index_of_cero] += 1;
+                    sum_of_k += 1;
+                    index_of_cero = array_of_k_result.indexOf(0);
+                }
+
+                let sum_n_observations = n_observations.reduce((prev, next) => prev + next, 0);
+                let i = 0;
+                while(sum_of_k < K_CLUSTERS && sum_n_observations > K_CLUSTERS) {
+                    let diffs = n_observations[i] - array_of_k_result[i];
+                    if(diffs > 0) {
+                        array_of_k_result[i] += 1;
+                        sum_of_k += 1;
+                    }
+
+                    i++;
+
+                    if(i >= n_observations.length) {
+                        i = 0;
+                    }
+                }
+
+                if(sum_n_observations <= K_CLUSTERS) {
+                    for(let i = 0; i < array_of_k_result; i++) {
+                        array_of_k_result[i] = n_observations[i];
+                    }
+                }
                 // We return the results of inversing the prioritization of clusters
                 return array_of_k_result;
             }
@@ -493,23 +783,39 @@
                 let cluster_result_array_of_level = [];
                 let array_of_data_indices_vectors = [];
 
+                let number_of_observations = 0;
+
                 // Get data belonging to each selected center and apply cluster algorythm over each split of data
                 for(let i = 0; i < selected_centers.length; i++) {
                     data = pond_get_observations_from_cluster(selected_centers[i], cluster_result_array[NV_INDEX-1], get_centers_labels);
 
                     let data_length = data.shape[0];
-                    if(data_length < array_of_k_clusters[i]) {
-                        array_of_k_clusters[i] = data_length;
+                    if(data_length > array_of_k_clusters[i]) {
+                        try {
+                            clustering_obj = clustering_function(data.values, array_of_k_clusters[i], { seed: RAND_STATE });
+                        }
+                        catch(error) {
+                            console.log(data_length, array_of_k_clusters[i]);
+                            throw error;
+                        }
                     }
-
-                    clustering_obj = clustering_function(data.values, array_of_k_clusters[i], { seed: RAND_STATE });
+                    else {
+                        clustering_obj = {
+                            centroids: data.values.map((centroid_element) => { return { centroid: centroid_element, error: 0, size: 1 } }),
+                            clusters: data.values.map((centroid_element, index) => index)
+                        };
+                    }
 
                     // Save clustering results
                     cluster_result_array_of_level.push(clustering_obj);
 
                     // Save data indices
                     array_of_data_indices_vectors.push(data.index);
+
+                    number_of_observations += data.index.length;
                 }
+
+                console.log('### NUMBER OF OBSERVATIONS ###', number_of_observations);
 
                 // Assign resulting labels to the data (for indexing purposes)
                 pond_add_cluster_labels(cluster_result_array_of_level, array_of_data_indices_vectors, get_centers_labels);
@@ -580,6 +886,8 @@
                 // Assign resulting labels to the data (for indexing purposes)
                 add_cluster_labels(clustering_obj.clusters, data.index);
 
+                //console.log('### NUMBER OF SELECTED OBSERVATIONS ###', data.index.length);
+
                 // Return cluster centers
                 return clustering_obj.centroids;
             }
@@ -605,6 +913,7 @@
                 // NAVIO  Step 1.  Create a Navio passing a DOM element to place it and an optional height
                 let nv = navio(navio_n_element, NV_HEIGHT);
                 // NAVIO Step 2. Load your data!
+                nv.nestedFilters = NV_NESTED_FILTERS;
                 nv.data(data);
 
                 // NAVIO Step 3. Detect your attributes (or load them manually)
@@ -612,6 +921,9 @@
 
                 let navios_to_drop = [];
                 let navio_table = navio_n_element.querySelector('g.brush rect');
+
+                // Measure performance
+                let start_time = 0;
 
                 // Callback to control whether the data was selected or not
                 navio_table.addEventListener('pointerdown', (event) => {
@@ -645,6 +957,9 @@
                         for(let navio_element_drop of navios_to_drop) {
                             navio_element_drop.remove();
                         }
+
+                        // Measure performance
+                        start_time = performance.now();
                     }
                 });
                 
@@ -679,9 +994,6 @@
                             // Transform Array of Arrays (matrix) to Array of Object (navio format)
                             let new_centroids = centers_arr_to_centers_obj(new_centers_data);
 
-                            // Measure performance
-                            let start_time = performance.now();
-
                             render_navio_pond(new_centroids);
 
                             // Measure performance
@@ -692,12 +1004,59 @@
                             for(let tooltip of tooltip_list) {
                                 tooltip.classList.replace('_nv_popover_dont_delete', '_nv_popover');
                             }
+
+                            //###############################
+                            // ### Evaluation of clusters ###
+                            //###############################
+                            /*let centers_labels = [];
+                            // Loop through the parents list of centers and get their number of observation
+                            for(let cluster_results_n of CLUSTERS_ARRAY[NV_INDEX]) {
+                                // Loop through the data of each cluster array
+                                for(let cluster_results_obj of cluster_results_n.centroids) {
+                                    centers_labels.push(cluster_results_obj.label);
+                                }
+                            }
+                            let curr_level = 'level_' + (NV_INDEX);
+                            let observations = [];
+                            let new_labels = [];
+                            // Get data and labels of the clusters of the current level (before the level we are currently generating)
+                            for(let i = 0; i < centers_labels.length; i++) {
+                                // Get indices of the selected data
+                                let array_of_indices = INDEXED_DATASET.loc({ columns: [curr_level] }).values.map((label_df, index) => { if(label_df[0] === centers_labels[i]) { return index } } );
+                                array_of_indices = array_of_indices.filter( (index) => index !== undefined);
+
+                                // Get the selected data from the DataFrame
+                                let sel_observations_df = INDEXED_DATASET.query(array_of_indices);
+
+                                // Return only the main columns (omit label columns)
+                                let aux_df = sel_observations_df.loc({ columns: DATASET_COLUMNS});
+
+                                // Save observation and its new cluster label to compute silhouette
+                                for(let observation of aux_df.values) {
+                                    observations.push(observation);
+                                    new_labels.push(i);
+                                }
+                            }
+
+                            // Compute silhouette
+                            let scores = silhouette_score(observations, new_labels);
+                            console.log('### SILHOUETTE ###', scores);*/
                         }
                         else {
                             console.log('ERROR')
                         }
                     }
                 );
+
+                /*if(NV_INDEX === 0) {
+                    //###############################
+                    // ### Evaluation of clusters ###
+                    //###############################
+                    let selected_data = INDEXED_DATASET.loc({ columns: DATASET_COLUMNS }).values;
+                    let labels = CLUSTERS_ARRAY[NV_INDEX][0].clusters;
+
+                    console.log('### SILHOUETTE ###', silhouette_score(selected_data, labels));
+                }*/
             }
 
             //####################################################################
@@ -722,6 +1081,7 @@
                 // NAVIO  Step 1.  Create a Navio passing a DOM element to place it and an optional height
                 let nv = navio(navio_n_element, NV_HEIGHT);
                 // NAVIO Step 2. Load your data!
+                nv.nestedFilters = NV_NESTED_FILTERS;
                 nv.data(data);
 
                 // NAVIO Step 3. Detect your attributes (or load them manually)
@@ -729,6 +1089,9 @@
 
                 let navios_to_drop = [];
                 let navio_table = navio_n_element.querySelector('g.brush rect');
+
+                // Measure performance
+                let start_time = 0;
 
                 // Callback to control whether the data was selected or not
                 navio_table.addEventListener('pointerdown', (event) => {
@@ -762,6 +1125,9 @@
                         for(let navio_element_drop of navios_to_drop) {
                             navio_element_drop.remove();
                         }
+
+                        // Measure performance
+                        start_time = performance.now();
                     }
                 });
                 
@@ -796,9 +1162,6 @@
                             // Transform Array of Arrays (matrix) to Array of Object (navio format)
                             let new_centroids = centers_arr_to_centers_obj(new_centers_data);
 
-                            // Measure performance
-                            let start_time = performance.now();
-
                             render_navio(new_centroids);
 
                             // Measure performance
@@ -809,12 +1172,40 @@
                             for(let tooltip of tooltip_list) {
                                 tooltip.classList.replace('_nv_popover_dont_delete', '_nv_popover');
                             }
+
+                            //###############################
+                            // ### Evaluation of clusters ###
+                            //###############################
+                            // Get selected data
+                            /*let df_data = new dfd.DataFrame([new Array(DATASET_COLUMNS.length)], { index: [-1], columns: DATASET_COLUMNS });
+                            for(let center of selected_clusters_array) {
+                                //Get observations from cluster
+                                let aux_df = get_observations_from_cluster(center, CLUSTERS_ARRAY[NV_INDEX-1]);
+                                df_data = df_data.append(aux_df.values, aux_df.index);
+                            }
+
+                            // Drop initial row (auxiliar row to append DFs)
+                            df_data.drop({ index: [-1], inplace: true });
+                            let selected_data = df_data.values;
+                            let labels = CLUSTERS_ARRAY[NV_INDEX].clusters;
+
+                            console.log('### SILHOUETTE ###', silhouette_score(selected_data, labels));*/
                         }
                         else {
                             console.log('ERROR')
                         }
                     }
                 );
+
+                /*if(NV_INDEX === 0) {
+                    //###############################
+                    // ### Evaluation of clusters ###
+                    //###############################
+                    let selected_data = INDEXED_DATASET.loc({ columns: DATASET_COLUMNS }).values;
+                    let labels = CLUSTERS_ARRAY[NV_INDEX].clusters;
+
+                    console.log('### SILHOUETTE ###', silhouette_score(selected_data, labels));
+                }*/
             }
 
             //####################################################################
@@ -842,6 +1233,115 @@
 
                 // NAVIO Step 3. Detect your attributes (or load them manually)
                 nv.addAllAttribs();
+
+                let lvl_index = 0;
+                let query_str = '#level' + lvl_index + ' g.brush rect';
+                let navio_table = navio_n_element.querySelector(query_str);
+
+                let init_subrender_time = 0;
+
+                // Callback to control if previous navio was used for a new selection.
+                navio_table.addEventListener('pointerup', (event) => {
+                    init_subrender_time = performance.now();
+                    //console.log('### INIT TIME ###', init_subrender_time);
+                });
+
+                nv.updateCallback(
+                    (selected) => {
+                        let end_time = performance.now()
+                        console.log(end_time - init_subrender_time, 'ms');
+                        init_subrender_time = 0;
+                        lvl_index++;
+                        let query_str = '#level' + lvl_index + ' g.brush rect';
+                        navio_table = navio_n_element.querySelector(query_str);
+                        navio_table.addEventListener('pointerup', (event) => {
+                            init_subrender_time = performance.now();
+                            //console.log('### INIT TIME ###', init_subrender_time);
+                        });
+                        //console.log('### END TIME ###', end_time);
+
+                        //###############################
+                        // ### Evaluation of clusters ###
+                        //###############################
+                        /*let selected_copy = selected.map(
+                            row => Object.fromEntries(
+                                DATASET_COLUMNS.map(
+                                    (key, index) => [key, row[key]]
+                                )
+                            )
+                        );
+
+                        let observations = selected_copy.map((center_obj) => Object.values(center_obj));
+
+                        let centers_index = 0;
+                        let center_label = 0;
+                        //let leap = Math.floor(observations.length / (NV_HEIGHT * 2));
+                        let leap = Math.max(Math.floor(observations.length / NV_HEIGHT), 1);
+                        let j = leap;
+                        let labels = [];
+                        if(observations.length > NV_HEIGHT) {
+                            for(let i = 0; i < observations.length; i++) {
+                                labels.push(center_label);
+                                if(i+1 === j) {
+                                    j += leap;
+                                    if(j < observations.length) {
+                                        center_label += 1;
+                                        centers_index += 1;
+                                    }
+                                    if(centers_index === NV_HEIGHT) {
+                                        console.log('### OUT OF BOUNDS ###');
+                                        centers_index -= 1;
+                                        center_label -= 1;
+                                    }
+                                }
+                            }
+                        }
+                        else {
+                            for(let i = 0; i < selected.length; i++) {
+                                labels.push(i);
+                            }
+                        }
+
+                        console.log('### SILHOUETTE ###', silhouette_score(observations, labels));*/
+                    }
+                );
+
+                //###############################
+                // ### Evaluation of clusters ###
+                //###############################
+                /*let selected_copy = data.map(
+                    row => Object.fromEntries(
+                        DATASET_COLUMNS.map(
+                            (key, index) => [key, row[key]]
+                        )
+                    )
+                );
+                let observations = selected_copy.map((center_obj) => Object.values(center_obj));
+                let centers_index = 0;
+                let center_label = 0;
+                //let leap = Math.floor(data.length / (NV_HEIGHT * 2));
+                let leap = Math.floor(observations.length / NV_HEIGHT);
+                let j = leap;
+                let labels = [];
+                for(let i = 0; i < observations.length; i++) {
+                    labels.push(center_label);
+                    if(i+1 === j) {
+                        j += leap;
+                        if(j < observations.length) {
+                            center_label += 1;
+                            centers_index += 1;
+                        }
+                        if(centers_index === NV_HEIGHT) {
+                            console.log('### OUT OF BOUNDS ###');
+                            centers_index -= 1;
+                            center_label -= 1;
+                        }
+                    }
+                }
+                console.log(leap, labels, centers_index);
+
+                console.log('### SILHOUETTE ###', silhouette_score(observations, labels));*/
+
             }
 
             //####################################################################
@@ -969,59 +1469,6 @@
                 //####################################################################
 
                 //####################################################################
-                // ### NAVIO WITH CLUSTERING & PONDERATIONS ###
-                //####################################################################
-
-                /*let centers_result_pond = nv_clustering(INDEXED_DATASET.values, null, CLUSTERS_ARRAY, CLUSTERING_ALGORYTHM);
-
-                // Transform Array of Arrays (matrix) to Array of Object (navio format)
-                let centroids_pond = centers_arr_to_centers_obj(centers_result_pond);
-
-                CLUSTERS_ARRAY[0] = [CLUSTERS_ARRAY[0]];
-
-                // Save each computed label with its corresponding centroid
-                for(let i = 0; i < centers_result_pond.length; i++) {
-                    centers_result_pond[i]['label'] = i.toString();
-                }
-
-                // Transform labels from int to string
-                INDEXED_DATASET['level_0'] = INDEXED_DATASET['level_0'].apply((label) => label.toString());
-
-                // Render navio
-                render_navio_pond(centroids_pond);*/
-
-                //####################################################################
-
-                //####################################################################
-                // ### NAVIO WITH CLUSTERING ###
-                //####################################################################
-
-                /*let centers_result = nv_clustering(INDEXED_DATASET.values, null, CLUSTERS_ARRAY, CLUSTERING_ALGORYTHM);
-
-                // Transform Array of Arrays (matrix) to Array of Object (navio format)
-                let centroids = centers_arr_to_centers_obj(centers_result);
-
-                // Render navio
-                render_navio(centroids);*/
-
-                //####################################################################
-
-                //####################################################################
-                // ### NAVIO WITHOUT CLUSTERING ###
-                //####################################################################
-
-                /*let feed_data = INDEXED_DATASET.values.map(
-                    row => Object.fromEntries(
-                        DATASET_COLUMNS.map(
-                            (key, index) => [key, row[index]]
-                        )
-                    )
-                )
-                render_navio_vanilla(feed_data);*/
-
-                //####################################################################
-
-                //####################################################################
                 // ### RENDER NAVIO BASED ON SELECTED STRATEGY ###
                 //####################################################################
 
@@ -1052,6 +1499,7 @@
             var NV_INDEX = 0;
             var NV_INDEX_POND = 0;
             var NV_HEIGHT = 600;
+            var NV_NESTED_FILTERS = true;
             var dataset_location = "https://gist.githubusercontent.com/netj/8836201/raw/6f9306ad21398ea43cba4f7d537619d0e07d5ae3/iris.csv";
             //var dataset_location = "./AirQualityUCI.csv";
             var LOADED_FILE;
@@ -1145,6 +1593,12 @@
             document.querySelector('#load_navio').addEventListener('click', main);
 
             //####################################################################
+
+            /*if(!NV_NESTED_FILTERS) {
+                NAVIOS_CONTAINER.style.display = 'inline-flex';
+            }*/
+
+            NAVIOS_CONTAINER.style.display = 'inline-flex';
         </script>
     </body>
 </html>
